@@ -1,4 +1,4 @@
-# Propensity Score Matching Analysis: Sleep Disturbances and Functional Decline in MIDUS Refresher 2
+# Re-analysis code; original pipeline unavailable. Published OR=1.81 vs re-analysis OR=0.99. See README for details.
 
 ## About This Repository
 
