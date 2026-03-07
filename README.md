@@ -108,6 +108,8 @@ and saves:
 CSV tables
 primary_results.csv – ORs and 95% CIs for:
 
+```r
+
 Poor vs Good,
 Poor vs Intermediate,
 Intermediate vs Good.
