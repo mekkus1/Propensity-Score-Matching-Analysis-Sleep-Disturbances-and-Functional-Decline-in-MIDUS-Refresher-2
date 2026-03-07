@@ -1,794 +1,758 @@
-# ============================================================================
-# PROPENSITY SCORE MATCHED ANALYSIS: Sleep Disturbances and Functional Decline
-# MIDUS Refresher 2 Study
-# Title: Dose-Response Association Between Poor Sleep and Functional Limitation 
-#        in Midlife: A Propensity Score–Matched Study
-# ============================================================================
+################################################################################
+# PROPENSITY SCORE MATCHED ANALYSIS WITH 3-LEVEL SLEEP EXPOSURE
+# Using your actual MIDUS Refresher 2 data 
+################################################################################
 
-# =========================
-# 1. LOAD PACKAGES
-# =========================
-packages <- c("tidyverse", "MatchIt", "cobalt", "sandwich", "lmtest", 
-              "tableone", "ROCR", "ggplot2", "gridExtra", "haven", "labelled",
-              "flextable", "officer", "cowplot")
-
-new_pkgs <- packages[!(packages %in% installed.packages()[,"Package"])]
-if(length(new_pkgs)) install.packages(new_pkgs)
+# ==============================================================================
+# 1. LOAD REQUIRED LIBRARIES
+# ==============================================================================
 
 library(tidyverse)
+library(nnet)
 library(MatchIt)
 library(cobalt)
 library(sandwich)
 library(lmtest)
-library(tableone)
-library(ROCR)
+library(broom)
 library(ggplot2)
-library(gridExtra)
-library(haven)
-library(labelled)
-library(flextable)
-library(officer)
-library(cowplot)
-library(janitor)
+library(haven)      # For reading SPSS files
+library(janitor)    # For cleaning names
 
-set.seed(123)
+# Set seed for reproducibility
+set.seed(2024)
 
-# ============================================================================
-# PART 1: DATA PREPARATION
-# ============================================================================
+# ==============================================================================
+# 2. LOADING DATA
+# ==============================================================================
 
-cat("\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 1: DATA PREPARATION\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
+cat("\n=== Loading MIDUS Refresher 2 Data ===\n")
 
-# Load MIDUS data
-midus_raw <- read_sav("/Users/philipsokeagu/Desktop/Personal Projects/Machine Project/dataset/MR2_P1_SURVEY_N2154_20251003 (1).sav")
+midus_raw <- read_sav("")
 
-# Clean and prepare data
+# Convert to dataframe and clean names
 midus <- midus_raw %>%
   clean_names() %>%
+  # Convert haven_labelled to numeric
   mutate(across(where(~inherits(., "haven_labelled")), 
                 ~as.numeric(as.character(.))))
 
-# Define disease variables
+cat("Data loaded successfully\n")
+cat("Sample size:", nrow(midus), "participants\n")
+cat("Number of variables:", ncol(midus), "\n")
+
+# ==============================================================================
+# 3. RECREATE THE OUTCOME VARIABLE (func_decline_true) FROM YOUR ORIGINAL CODE
+# ==============================================================================
+
+cat("\n=== Creating Functional Limitation Outcome ===\n")
+
+# Define the disease variables for multimorbidity (from your original code)
 disease_vars <- c("rb1sa11s","rb1sa11x","rb1sa12d","rb1pa6a",
                   "rb1pa26","rb1sa11c","rb1sa11d","rb1pa2")
 
-# Define functional decline variables
+# TRUE functional impairment variables (validated ADL/IADL)
 true_func_vars <- c("rb1sbadl1", "rb1pd12")
 
-# Create outcomes
+# Recreate the outcome variables exactly as in your original code
 midus <- midus %>%
   mutate(
+    # Multimorbidity (>=2 chronic conditions)
     disease_count = rowSums(midus[, disease_vars] == 1, na.rm = TRUE),
     multimorbidity = ifelse(disease_count >= 2, 1, 0),
-    functional_decline = ifelse(
-      rowSums(midus[, true_func_vars] >= 2, na.rm = TRUE) >= 1, 1, 0
+    
+    # TRUE FUNCTIONAL DECLINE - Using validated ADL/IADL items
+    # At least ONE limitation in ADL or IADL (score ≥2)
+    func_decline_true = ifelse(
+      rowSums(midus[, true_func_vars] >= 2, na.rm = TRUE) >= 1,
+      1, 0
+    ),
+    
+    # Secondary outcomes for sensitivity analysis
+    any_adl = ifelse(rb1sbadl1 > 1, 1, 0),
+    any_iadl = ifelse(rb1pd12 > 1, 1, 0),
+    
+    # Keep original broad definition for comparison
+    func_limit_count = rowSums(midus[, c("rb1sa24b","rb1sa24f","rb1sa24c",
+                                         "rb1sa24af","rb1sa24ag")] > 1, na.rm = TRUE),
+    poor_health = ifelse(rb1pa1 %in% c(4,5), 1, 0)
+  )
+
+# Create the functional limitation factor variable
+midus <- midus %>%
+  mutate(
+    functional_limitation = factor(
+      ifelse(func_decline_true == 1, "Yes", "No"),
+      levels = c("No", "Yes")
     )
   )
 
-# Select predictor set
-predictors <- c(
-  "rb1pa60","rb1sa20b","rb1sa20d","rb1sa20f","rb1pg100b",
-  "rb1sa53a","rb1sa57a","rb1sa57b","rb1sa57d",
-  "rb1sbmi","rb1sa31",
-  "rb1se1z","rb1se4e","rb1sp1e",
-  "rb1sg1","rb1pb1","rb1pb16","rb1sf17b","rb1sc1",
-  "rb1pa39","rb1pa51","rb1pa55","rb1sa52f",
-  "rb1se1p","rb1pb19","rb1slfedi",
-  "rb1prage","rb1prsex","rb1pf7a"
-)
+# Check outcome prevalence
+cat("\n=== Outcome Prevalence ===\n")
+cat("Multimorbidity:", round(mean(midus$multimorbidity, na.rm=TRUE)*100, 1), "%\n")
+cat("Functional Decline (True ADL/IADL):", 
+    round(mean(midus$func_decline_true, na.rm=TRUE)*100, 1), "%\n")
+cat("  - Any ADL limitation:", round(mean(midus$any_adl, na.rm=TRUE)*100, 1), "%\n")
+cat("  - Any IADL limitation:", round(mean(midus$any_iadl, na.rm=TRUE)*100, 1), "%\n")
 
-# Create analysis dataset
-vars_to_keep <- c("multimorbidity", "functional_decline", predictors)
-vars_to_keep <- vars_to_keep[vars_to_keep %in% names(midus)]
-ml_data <- midus[, vars_to_keep]
+# ==============================================================================
+# 4. CREATE THE 3-LEVEL SLEEP EXPOSURE VARIABLE
+# ==============================================================================
 
-cat("Data loaded successfully with", nrow(ml_data), "rows and", ncol(ml_data), "columns\n")
+cat("\n=== Creating 3-Level Sleep Exposure ===\n")
 
-# ============================================================================
-# PART 2: DEFINE TREATMENT AND OUTCOME VARIABLES
-# ============================================================================
-
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 2: DEFINING TREATMENT AND OUTCOME VARIABLES\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-
-psm_data <- ml_data %>%
+midus <- midus %>%
   mutate(
-    # Primary treatment: Feeling unrested during the day
-    poor_sleep = case_when(
-      rb1sa57d >= 4 ~ 1,  # Often/always = poor sleep
-      rb1sa57d <= 2 ~ 0,  # Never/rarely = good sleep
-      TRUE ~ NA_real_      # Exclude "Sometimes" (3)
-    ),
+    # Create 3-level sleep variable from rb1sa57d (Unrested during day)
+    # Original coding: 1=Never, 2=Rarely, 3=Sometimes, 4=Often, 5=Almost Always
+    sleep_3level = factor(case_when(
+      rb1sa57d %in% c(1, 2) ~ "Good",        # Never/Rarely
+      rb1sa57d == 3 ~ "Intermediate",         # Sometimes
+      rb1sa57d %in% c(4, 5) ~ "Poor"          # Often/Almost Always
+    ), levels = c("Good", "Intermediate", "Poor")),
     
-    # Alternative treatment: Trouble falling asleep
-    trouble_sleep = case_when(
-      rb1sa57a >= 4 ~ 1,
-      rb1sa57a <= 2 ~ 0,
-      TRUE ~ NA_real_
-    ),
-    
-    # Alternative treatment: Night waking
-    night_waking = case_when(
-      rb1sa57b >= 4 ~ 1,
-      rb1sa57b <= 2 ~ 0,
-      TRUE ~ NA_real_
-    ),
-    
-    # Keep original sleep variables for continuous analyses
-    unrested_continuous = rb1sa57d,
-    trouble_continuous = rb1sa57a,
-    waking_continuous = rb1sa57b,
-    
-    # Outcome
-    functional_decline = functional_decline
+    # Original dichotomous version (for comparison)
+    poor_sleep_original = factor(case_when(
+      rb1sa57d %in% c(1, 2) ~ "No",
+      rb1sa57d %in% c(4, 5) ~ "Yes",
+      TRUE ~ NA_character_
+    ), levels = c("No", "Yes"))
   )
 
-# Check sample sizes
-cat("\nTreatment group sizes (poor sleep - feeling unrested):\n")
-print(table(psm_data$poor_sleep, useNA = "ifany"))
+# Check distribution
+cat("\nSleep distribution (3-level):\n")
+print(table(midus$sleep_3level))
+print(prop.table(table(midus$sleep_3level)))
 
-cat("\nOutcome prevalence:\n")
-cat("Functional decline overall:", round(mean(psm_data$functional_decline, na.rm = TRUE)*100, 1), "%\n")
-cat("Functional decline in poor sleep group:", 
-    round(mean(psm_data$functional_decline[psm_data$poor_sleep == 1], na.rm = TRUE)*100, 1), "%\n")
-cat("Functional decline in good sleep group:", 
-    round(mean(psm_data$functional_decline[psm_data$poor_sleep == 0], na.rm = TRUE)*100, 1), "%\n")
+cat("\nOriginal dichotomous (excluding 'sometimes'):\n")
+print(table(midus$poor_sleep_original, useNA = "ifany"))
+cat(sprintf("Excluded 'sometimes': %d participants\n", 
+            sum(is.na(midus$poor_sleep_original))))
 
-# ============================================================================
-# PART 3: SELECT CONFOUNDERS AND CREATE COMPLETE CASE DATASET
-# ============================================================================
+# ==============================================================================
+# 5. HANDLE SMOKING VARIABLE (as in your original code)
+# ==============================================================================
 
-confounders <- c(
-  "rb1prage", "rb1prsex", "rb1pf7a", "rb1pb16", "rb1sg1", 
-  "rb1sf17b", "rb1pb19", "rb1sbmi", "rb1pa39", "rb1pa51", 
-  "rb1sa52f", "rb1pa60", "rb1se1z", "rb1se4e", "multimorbidity"
-)
+cat("\n=== Handling Smoking Variable ===\n")
 
-cat("\nConfounders selected for propensity score model:\n")
-print(confounders)
+midus <- midus %>%
+  mutate(
+    rb1pa39 = case_when(
+      is.na(rb1pa39) ~ 3,  # Unknown category
+      rb1pa39 == 1 ~ 1,     # Yes
+      rb1pa39 == 2 ~ 2,     # No
+      TRUE ~ 3               # Default to Unknown
+    )
+  )
 
-# Create complete case dataset
-psm_complete <- psm_data %>%
-  filter(!is.na(poor_sleep), !is.na(functional_decline)) %>%
-  select(poor_sleep, functional_decline, all_of(confounders)) %>%
-  na.omit()
+cat("Smoking status (rb1pa39) recoded: 1=Yes, 2=No, 3=Unknown\n")
 
-cat("\n", paste(rep("-", 40), collapse = ""), "\n")
-cat("PARTICIPANT FLOW\n")
-cat(paste(rep("-", 40), collapse = ""), "\n")
-cat("Total MIDUS participants:", nrow(ml_data), "\n")
-cat("Excluded 'sometimes' responses:", sum(is.na(psm_data$poor_sleep)), "\n")
-cat("Eligible for PSM:", nrow(psm_complete), "\n")
-cat("  Poor sleep group n:", sum(psm_complete$poor_sleep == 1), "\n")
-cat("  Good sleep group n:", sum(psm_complete$poor_sleep == 0), "\n")
-cat(paste(rep("-", 40), collapse = ""), "\n")
+# ==============================================================================
+# 6. CREATE ANALYSIS DATASET
+# ==============================================================================
 
-# ============================================================================
-# PART 4: PRE-MATCHING BALANCE ASSESSMENT
-# ============================================================================
+cat("\n=== Creating Analysis Dataset ===\n")
 
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 4: PRE-MATCHING BALANCE ASSESSMENT\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
+analysis_data <- midus %>%
+  dplyr::select(
+    # ID (use row number as ID if no specific ID column)
+    id = 1,  # Using first column as ID
+    
+    # Outcomes and exposure
+    sleep_3level,
+    functional_limitation,
+    func_decline_true,
+    multimorbidity,
+    
+    # Demographics
+    age = rb1prage,
+    sex = rb1prsex,
+    race = rb1pf7a,
+    
+    # Socioeconomic
+    education = rb1pb1,
+    income = rb1pb16,
+    marital = rb1pb19,
+    employment = rb1sf17b,
+    
+    # Health behaviors
+    bmi = rb1sbmi,
+    smoking = rb1pa39,
+    alcohol_freq = rb1pa51,
+    exercise_freq = rb1sa52f,
+    
+    # Mental health
+    depression = rb1pa60,
+    overwhelmed = rb1se1z,
+    beyond_control = rb1se4e,
+    
+    # Additional sleep variables for dose-response
+    trouble_falling = rb1sa57a,
+    night_waking = rb1sa57b
+  ) %>%
+  # Remove rows with missing sleep_3level
+  filter(!is.na(sleep_3level)) %>%
+  # Convert categorical variables to factors
+  mutate(
+    sex = factor(sex, labels = c("Male", "Female")),
+    race = factor(race),
+    marital = factor(marital),
+    employment = factor(employment),
+    smoking = factor(smoking, labels = c("Yes", "No", "Unknown")),
+    alcohol_freq = factor(alcohol_freq),
+    exercise_freq = factor(exercise_freq),
+    depression = factor(ifelse(depression == 1, "Yes", "No"), 
+                        levels = c("No", "Yes")),
+    overwhelmed = factor(overwhelmed),
+    beyond_control = factor(beyond_control),
+    multimorbidity = factor(ifelse(multimorbidity == 1, "Yes", "No"),
+                            levels = c("No", "Yes"))
+  )
 
-pre_match_table <- CreateTableOne(
-  vars = confounders,
-  strata = "poor_sleep",
-  data = psm_complete,
-  test = TRUE
-)
+cat(sprintf("Analysis dataset: %d participants\n", nrow(analysis_data)))
+cat("Sleep distribution in analysis dataset:\n")
+print(table(analysis_data$sleep_3level))
 
-print(pre_match_table, smd = TRUE)
+# ==============================================================================
+# 7. CHECK FOR MISSING VALUES AND IMPUTE IF NEEDED
+# ==============================================================================
 
-pre_smd <- ExtractSmd(pre_match_table)
-cat("\nStandardized Mean Differences (pre-matching):\n")
-print(round(pre_smd, 3))
+cat("\n=== Checking Missing Values ===\n")
 
-# ============================================================================
-# PART 5: PROPENSITY SCORE ESTIMATION
-# ============================================================================
+missing_summary <- analysis_data %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") %>%
+  filter(n_missing > 0)
 
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 5: PROPENSITY SCORE ESTIMATION\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-
-ps_model <- glm(poor_sleep ~ ., 
-                data = psm_complete[, c("poor_sleep", confounders)], 
-                family = binomial)
-
-psm_complete$ps <- predict(ps_model, type = "response")
-
-cat("\nPropensity Score Distribution:\n")
-cat("Poor sleep group - mean (SD):", 
-    round(mean(psm_complete$ps[psm_complete$poor_sleep == 1]), 3), "(",
-    round(sd(psm_complete$ps[psm_complete$poor_sleep == 1]), 3), ")\n")
-cat("Good sleep group - mean (SD):", 
-    round(mean(psm_complete$ps[psm_complete$poor_sleep == 0]), 3), "(",
-    round(sd(psm_complete$ps[psm_complete$poor_sleep == 0]), 3), ")\n")
-
-# Plot propensity score distribution
-ps_plot <- ggplot(psm_complete, aes(x = ps, fill = factor(poor_sleep))) +
-  geom_density(alpha = 0.5) +
-  scale_fill_manual(values = c("steelblue", "firebrick"), 
-                    labels = c("Good Sleep", "Poor Sleep")) +
-  labs(title = "Propensity Score Distribution",
-       x = "Propensity Score", y = "Density",
-       fill = "Sleep Group") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(ps_plot)
-ggsave("ps_distribution.png", ps_plot, width = 8, height = 5)
-
-# ============================================================================
-# PART 6: PROPENSITY SCORE MATCHING - COMPARING RATIOS
-# ============================================================================
-
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 6: PROPENSITY SCORE MATCHING\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-
-# 1:1 matching
-match_1to1 <- matchit(poor_sleep ~ ., 
-                      data = psm_complete[, c("poor_sleep", confounders)],
-                      method = "nearest", 
-                      ratio = 1, 
-                      caliper = 0.2)
-
-# 1:2 matching
-match_1to2 <- matchit(poor_sleep ~ ., 
-                      data = psm_complete[, c("poor_sleep", confounders)],
-                      method = "nearest", 
-                      ratio = 2, 
-                      caliper = 0.2)
-
-# 1:3 matching (primary)
-match_1to3 <- matchit(poor_sleep ~ ., 
-                      data = psm_complete[, c("poor_sleep", confounders)],
-                      method = "nearest", 
-                      ratio = 3, 
-                      caliper = 0.2)
-
-# Compare sample sizes
-cat("\n", paste(rep("-", 40), collapse = ""), "\n")
-cat("SAMPLE SIZE COMPARISON\n")
-cat(paste(rep("-", 40), collapse = ""), "\n")
-cat("1:1 matching - Treated:", summary(match_1to1)$nn["Matched", "Treated"], 
-    "Control:", summary(match_1to1)$nn["Matched", "Control"], 
-    "Total:", summary(match_1to1)$nn["Matched", "Treated"] + summary(match_1to1)$nn["Matched", "Control"], "\n")
-cat("1:2 matching - Treated:", summary(match_1to2)$nn["Matched", "Treated"], 
-    "Control:", summary(match_1to2)$nn["Matched", "Control"], 
-    "Total:", summary(match_1to2)$nn["Matched", "Treated"] + summary(match_1to2)$nn["Matched", "Control"], "\n")
-cat("1:3 matching - Treated:", summary(match_1to3)$nn["Matched", "Treated"], 
-    "Control:", summary(match_1to3)$nn["Matched", "Control"], 
-    "Total:", summary(match_1to3)$nn["Matched", "Treated"] + summary(match_1to3)$nn["Matched", "Control"], "\n")
-
-# Balance comparison across ratios
-balance_1to1 <- bal.tab(match_1to1, un = TRUE)
-balance_1to2 <- bal.tab(match_1to2, un = TRUE)
-balance_1to3 <- bal.tab(match_1to3, un = TRUE)
-
-mean_smd_1to1 <- mean(abs(balance_1to1$Balance[balance_1to1$Balance$Type != "Distance", "Diff.Adj"]), na.rm = TRUE)
-mean_smd_1to2 <- mean(abs(balance_1to2$Balance[balance_1to2$Balance$Type != "Distance", "Diff.Adj"]), na.rm = TRUE)
-mean_smd_1to3 <- mean(abs(balance_1to3$Balance[balance_1to3$Balance$Type != "Distance", "Diff.Adj"]), na.rm = TRUE)
-
-max_smd_1to1 <- max(abs(balance_1to1$Balance[balance_1to1$Balance$Type != "Distance", "Diff.Adj"]), na.rm = TRUE)
-max_smd_1to2 <- max(abs(balance_1to2$Balance[balance_1to2$Balance$Type != "Distance", "Diff.Adj"]), na.rm = TRUE)
-max_smd_1to3 <- max(abs(balance_1to3$Balance[balance_1to3$Balance$Type != "Distance", "Diff.Adj"]), na.rm = TRUE)
-
-cat("\n", paste(rep("-", 40), collapse = ""), "\n")
-cat("BALANCE COMPARISON\n")
-cat(paste(rep("-", 40), collapse = ""), "\n")
-cat("1:1 matching - Mean SMD:", round(mean_smd_1to1, 3), "Max SMD:", round(max_smd_1to1, 3), "\n")
-cat("1:2 matching - Mean SMD:", round(mean_smd_1to2, 3), "Max SMD:", round(max_smd_1to2, 3), "\n")
-cat("1:3 matching - Mean SMD:", round(mean_smd_1to3, 3), "Max SMD:", round(max_smd_1to3, 3), "\n")
-
-# Love plots
-love_plot_1to1 <- love.plot(match_1to1, 
-                            thresholds = c(m = 0.2),
-                            var.order = "unadjusted", 
-                            abs = TRUE,
-                            title = "Balance After 1:1 Matching") +
-  theme_minimal()
-ggsave("love_plot_1to1.png", love_plot_1to1, width = 8, height = 6)
-
-love_plot_1to2 <- love.plot(match_1to2, 
-                            thresholds = c(m = 0.2),
-                            var.order = "unadjusted", 
-                            abs = TRUE,
-                            title = "Balance After 1:2 Matching") +
-  theme_minimal()
-ggsave("love_plot_1to2.png", love_plot_1to2, width = 8, height = 6)
-
-love_plot_1to3 <- love.plot(match_1to3, 
-                            thresholds = c(m = 0.2),
-                            var.order = "unadjusted", 
-                            abs = TRUE,
-                            title = "Balance After 1:3 Matching") +
-  theme_minimal()
-ggsave("love_plot_1to3.png", love_plot_1to3, width = 8, height = 6)
-
-# Balance comparison table
-balance_comparison <- data.frame(
-  Ratio = c("1:1", "1:2", "1:3"),
-  Treated_Matched = c(summary(match_1to1)$nn["Matched", "Treated"],
-                      summary(match_1to2)$nn["Matched", "Treated"],
-                      summary(match_1to3)$nn["Matched", "Treated"]),
-  Control_Matched = c(summary(match_1to1)$nn["Matched", "Control"],
-                      summary(match_1to2)$nn["Matched", "Control"],
-                      summary(match_1to3)$nn["Matched", "Control"]),
-  Total_Matched = c(summary(match_1to1)$nn["Matched", "Treated"] + summary(match_1to1)$nn["Matched", "Control"],
-                    summary(match_1to2)$nn["Matched", "Treated"] + summary(match_1to2)$nn["Matched", "Control"],
-                    summary(match_1to3)$nn["Matched", "Treated"] + summary(match_1to3)$nn["Matched", "Control"]),
-  Mean_SMD = round(c(mean_smd_1to1, mean_smd_1to2, mean_smd_1to3), 3),
-  Max_SMD = round(c(max_smd_1to1, max_smd_1to2, max_smd_1to3), 3)
-)
-
-cat("\nBalance Comparison Table:\n")
-print(balance_comparison)
-write.csv(balance_comparison, "balance_comparison_table.csv", row.names = FALSE)
-
-# ============================================================================
-# PART 7: SELECT PRIMARY MATCHING RATIO (1:3) AND EXTRACT MATCHED DATA
-# ============================================================================
-
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 7: PRIMARY ANALYSIS WITH 1:3 MATCHING\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-
-match_primary <- match_1to3
-matched_data <- match.data(match_primary)
-
-cat("\nPrimary matched sample size:", nrow(matched_data), "\n")
-cat("Poor sleep group n:", sum(matched_data$poor_sleep == 1), "\n")
-cat("Good sleep group n:", sum(matched_data$poor_sleep == 0), "\n")
-
-# ============================================================================
-# PART 8: POST-MATCHING BALANCE CHECK
-# ============================================================================
-
-cat("\n", paste(rep("-", 40), collapse = ""), "\n")
-cat("POST-MATCHING BALANCE (1:3)\n")
-cat(paste(rep("-", 40), collapse = ""), "\n")
-
-post_match_table <- CreateTableOne(
-  vars = confounders,
-  strata = "poor_sleep",
-  data = matched_data,
-  test = TRUE
-)
-
-print(post_match_table, smd = TRUE)
-
-post_smd <- ExtractSmd(post_match_table)
-
-balance_data <- data.frame(
-  Variable = c("Age", "Sex", "Race/Ethnicity", "Income", "Education years", 
-               "Employment status", "Marital status", "BMI", "Smoking status", 
-               "Alcohol frequency", "Exercise frequency", "Depression", 
-               "Feeling overwhelmed", "Life beyond control", "Multimorbidity"),
-  Pre_Match = round(pre_smd[1:length(confounders)], 3),
-  Post_Match = round(post_smd[1:length(confounders)], 3)
-)
-
-cat("\nBalance Assessment (SMDs):\n")
-print(balance_data)
-
-# Create love plot for primary match
-love_plot_primary <- love.plot(match_primary, 
-                               thresholds = c(m = 0.2),
-                               var.order = "unadjusted", 
-                               abs = TRUE,
-                               title = "Covariate Balance Before and After 1:3 Matching") +
-  theme_minimal()
-ggsave("love_plot_primary.png", love_plot_primary, width = 8, height = 6)
-
-# ============================================================================
-# PART 9: PRIMARY OUTCOME ANALYSIS
-# ============================================================================
-
-cat("\n", paste(rep("-", 40), collapse = ""), "\n")
-cat("PRIMARY OUTCOME ANALYSIS\n")
-cat(paste(rep("-", 40), collapse = ""), "\n")
-
-# Add functional decline to matched data if not present
-if(!"functional_decline" %in% names(matched_data)) {
-  matched_indices <- as.numeric(rownames(matched_data))
-  matched_data$functional_decline <- psm_complete$functional_decline[matched_indices]
+if(nrow(missing_summary) > 0) {
+  print(missing_summary)
+  
+  # Simple median/mode imputation
+  analysis_data <- analysis_data %>%
+    mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+    mutate(across(where(is.factor), ~{
+      if(any(is.na(.))) {
+        mode_val <- names(sort(table(.), decreasing = TRUE))[1]
+        fct_explicit_na(., na_level = mode_val)
+      } else {
+        .
+      }
+    }))
+  
+  cat("\nMissing values imputed\n")
+} else {
+  cat("No missing values found!\n")
 }
 
-# Calculate prevalence in matched sample
-poor_sleep_prev <- mean(matched_data$functional_decline[matched_data$poor_sleep == 1])
-good_sleep_prev <- mean(matched_data$functional_decline[matched_data$poor_sleep == 0])
-rd <- poor_sleep_prev - good_sleep_prev
-nnh <- 1 / rd
+# ==============================================================================
+# 8. MULTINOMIAL PROPENSITY SCORE MODEL
+# ==============================================================================
 
-cat("\nFunctional decline prevalence:\n")
-cat("  Poor sleep group:", round(poor_sleep_prev * 100, 1), "%\n")
-cat("  Good sleep group:", round(good_sleep_prev * 100, 1), "%\n")
-cat("  Risk difference:", round(rd, 3), "\n")
-cat("  Number needed to harm:", round(abs(nnh), 1), "\n")
+cat("\n=== Estimating Propensity Scores ===\n")
 
-# Logistic regression with robust SEs, adjusting for variables with residual imbalance
-outcome_model <- glm(functional_decline ~ poor_sleep + rb1se1z + rb1pa60 + rb1sg1, 
-                     data = matched_data, 
-                     family = binomial,
-                     weights = weights)
-
-robust_se <- coeftest(outcome_model, vcov = vcovCL, cluster = ~subclass)
-
-cat("\nTreatment effect (robust SEs clustered on matched pairs):\n")
-print(robust_se)
-
-or_estimate <- exp(coef(outcome_model)["poor_sleep"])
-or_ci <- exp(confint(outcome_model)["poor_sleep", ])
-
-cat("\nOdds Ratio (95% CI):", round(or_estimate, 2), 
-    "(", round(or_ci[1], 2), "-", round(or_ci[2], 2), ")\n")
-cat("p-value:", round(robust_se["poor_sleep", "Pr(>|z|)"], 4), "\n")
-
-# ============================================================================
-# PART 10: ADDITIONAL SLEEP ANALYSES
-# ============================================================================
-
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 10: ADDITIONAL SLEEP ANALYSES\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-
-# Add new sleep variables
-psm_data <- psm_data %>%
-  mutate(
-    sleep_composite = rowMeans(select(., rb1sa57a, rb1sa57b, rb1sa57d), na.rm = TRUE),
-    sleep_count = (rb1sa57d >= 4) + (rb1sa57a >= 4) + (rb1sa57b >= 4)
-  )
-
-# Recreate complete dataset for additional analyses
-psm_complete_all <- psm_data %>%
-  filter(!is.na(poor_sleep), !is.na(functional_decline)) %>%
-  select(poor_sleep, functional_decline, 
-         rb1sa57d, rb1sa57a, rb1sa57b,
-         unrested_continuous, trouble_continuous, waking_continuous,
-         sleep_composite, sleep_count,
-         all_of(confounders)) %>%
-  na.omit()
-
-cat("\nSample for additional analyses:", nrow(psm_complete_all), "\n")
-
-# 10.1 Composite Score Analysis
-cat("\n--- Composite Sleep Score Analysis ---\n")
-
-cutpoint <- quantile(psm_complete_all$sleep_composite, 0.75, na.rm = TRUE)
-psm_complete_all$poor_sleep_composite <- ifelse(psm_complete_all$sleep_composite >= cutpoint, 1, 0)
-
-cat("Composite score cutpoint (75th percentile):", round(cutpoint, 2), "\n")
-cat("Poor sleep composite group n:", sum(psm_complete_all$poor_sleep_composite == 1), "\n")
-cat("Good sleep composite group n:", sum(psm_complete_all$poor_sleep_composite == 0), "\n")
-
-match_composite <- matchit(poor_sleep_composite ~ ., 
-                           data = psm_complete_all[, c("poor_sleep_composite", confounders)],
-                           method = "nearest", ratio = 3, caliper = 0.2)
-
-matched_composite <- match.data(match_composite)
-matched_composite$functional_decline <- psm_complete_all$functional_decline[as.numeric(rownames(matched_composite))]
-
-model_composite <- glm(functional_decline ~ poor_sleep_composite, 
-                       data = matched_composite, 
-                       family = binomial,
-                       weights = weights)
-
-or_composite <- exp(coef(model_composite)["poor_sleep_composite"])
-ci_composite <- exp(confint(model_composite)["poor_sleep_composite", ])
-
-cat("\nComposite Score - OR (95% CI):", round(or_composite, 2), 
-    "(", round(ci_composite[1], 2), "-", round(ci_composite[2], 2), ")\n")
-
-# 10.2 Dose-Response Analysis (Continuous)
-cat("\n--- Dose-Response Analysis (Continuous) ---\n")
-
-model_continuous <- glm(functional_decline ~ unrested_continuous + trouble_continuous + waking_continuous + 
-                          rb1prage + rb1prsex + rb1pf7a + rb1pb16 + rb1sg1 + 
-                          rb1sf17b + rb1pb19 + rb1sbmi + rb1pa39 + rb1pa51 + 
-                          rb1sa52f + rb1pa60 + rb1se1z + rb1se4e + multimorbidity,
-                        data = psm_complete_all, family = binomial)
-
-sleep_coefs <- exp(coef(model_continuous)[c("unrested_continuous", "trouble_continuous", "waking_continuous")])
-sleep_ci <- exp(confint(model_continuous)[c("unrested_continuous", "trouble_continuous", "waking_continuous"), ])
-
-results_cont <- data.frame(
-  Variable = c("Feeling unrested", "Trouble falling asleep", "Night waking"),
-  OR = round(sleep_coefs, 2),
-  CI_Lower = round(sleep_ci[, 1], 2),
-  CI_Upper = round(sleep_ci[, 2], 2)
+ps_model <- multinom(
+  sleep_3level ~ age + sex + race + income + education + employment + marital +
+    bmi + smoking + alcohol_freq + exercise_freq + depression + 
+    overwhelmed + beyond_control + multimorbidity,
+  data = analysis_data,
+  trace = FALSE
 )
 
-print(results_cont)
+# Get predicted probabilities
+probs <- predict(ps_model, type = "probs")
+analysis_data$ps_good <- probs[, "Good"]
+analysis_data$ps_intermediate <- probs[, "Intermediate"]
+analysis_data$ps_poor <- probs[, "Poor"]
 
-# 10.3 Sleep Count Analysis
-cat("\n--- Sleep Count Analysis ---\n")
+cat("Propensity score ranges:\n")
+cat(sprintf("  Good: %.3f - %.3f\n", min(analysis_data$ps_good), max(analysis_data$ps_good)))
+cat(sprintf("  Intermediate: %.3f - %.3f\n", min(analysis_data$ps_intermediate), max(analysis_data$ps_intermediate)))
+cat(sprintf("  Poor: %.3f - %.3f\n", min(analysis_data$ps_poor), max(analysis_data$ps_poor)))
 
-cat("Sleep count distribution:\n")
-print(table(psm_complete_all$sleep_count))
+# ==============================================================================
+# 9. PAIRWISE PROPENSITY SCORE MATCHING
+# ==============================================================================
 
-model_count_cont <- glm(functional_decline ~ sleep_count + 
-                          rb1prage + rb1prsex + rb1pf7a + rb1pb16 + rb1sg1 + 
-                          rb1sf17b + rb1pb19 + rb1sbmi + rb1pa39 + rb1pa51 + 
-                          rb1sa52f + rb1pa60 + rb1se1z + rb1se4e + multimorbidity,
-                        data = psm_complete_all, family = binomial)
+cat("\n=== Performing Pairwise Propensity Score Matching ===\n")
 
-or_count <- exp(coef(model_count_cont)["sleep_count"])
-ci_count <- exp(confint(model_count_cont)["sleep_count", ])
+# 9.1 Poor vs Good matching
+data_poor_good <- analysis_data %>%
+  filter(sleep_3level %in% c("Good", "Poor")) %>%
+  mutate(treatment = ifelse(sleep_3level == "Poor", 1, 0))
 
-cat("\nPer additional sleep problem - OR (95% CI):", round(or_count, 2), 
-    "(", round(ci_count[1], 2), "-", round(ci_count[2], 2), ")\n")
-cat("p for trend:", round(summary(model_count_cont)$coefficients["sleep_count", 4], 4), "\n")
+cat("\n--- Poor vs Good ---\n")
+cat(sprintf("Sample size: %d (Good: %d, Poor: %d)\n", 
+            nrow(data_poor_good),
+            sum(data_poor_good$sleep_3level == "Good"),
+            sum(data_poor_good$sleep_3level == "Poor")))
 
-# Sleep count categories
-psm_complete_all$sleep_count_cat <- factor(psm_complete_all$sleep_count, 
-                                           levels = 0:3,
-                                           labels = c("0 problems", "1 problem", 
-                                                      "2 problems", "3 problems"))
-
-model_count_cat <- glm(functional_decline ~ sleep_count_cat + 
-                         rb1prage + rb1prsex + rb1pf7a + rb1pb16 + rb1sg1 + 
-                         rb1sf17b + rb1pb19 + rb1sbmi + rb1pa39 + rb1pa51 + 
-                         rb1sa52f + rb1pa60 + rb1se1z + rb1se4e + multimorbidity,
-                       data = psm_complete_all, family = binomial)
-
-or_cats <- exp(coef(model_count_cat)[grep("sleep_count_cat", names(coef(model_count_cat)))])
-ci_cats <- exp(confint(model_count_cat)[grep("sleep_count_cat", rownames(confint(model_count_cat))), ])
-
-cat("\nSleep problems category (vs. 0 problems):\n")
-cat("1 problem vs 0 - OR:", round(or_cats[1], 2), 
-    "(", round(ci_cats[1, 1], 2), "-", round(ci_cats[1, 2], 2), ")\n")
-cat("2 problems vs 0 - OR:", round(or_cats[2], 2), 
-    "(", round(ci_cats[2, 1], 2), "-", round(ci_cats[2, 2], 2), ")\n")
-cat("3 problems vs 0 - OR:", round(or_cats[3], 2), 
-    "(", round(ci_cats[3, 1], 2), "-", round(ci_cats[3, 2], 2), ")\n")
-
-# ============================================================================
-# PART 11: SUBGROUP ANALYSES
-# ============================================================================
-
-cat("\n\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("PART 11: SUBGROUP ANALYSES\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-
-# Add age group and sex to matched data
-matched_data$age_group <- ifelse(matched_data$rb1prage < 50, "<50", "≥50")
-matched_data$sex <- matched_data$rb1prsex
-
-# Age <50
-young_match <- subset(matched_data, age_group == "<50")
-model_young <- glm(functional_decline ~ poor_sleep + rb1se1z + rb1pa60 + rb1sg1, 
-                   data = young_match, family = binomial, weights = weights)
-or_young <- exp(coef(model_young)["poor_sleep"])
-ci_young <- exp(confint(model_young)["poor_sleep", ])
-
-# Age ≥50
-older_match <- subset(matched_data, age_group == "≥50")
-model_older <- glm(functional_decline ~ poor_sleep + rb1se1z + rb1pa60 + rb1sg1, 
-                   data = older_match, family = binomial, weights = weights)
-or_older <- exp(coef(model_older)["poor_sleep"])
-ci_older <- exp(confint(model_older)["poor_sleep", ])
-
-# Males
-male_match <- subset(matched_data, sex == 1)
-model_male <- glm(functional_decline ~ poor_sleep + rb1se1z + rb1pa60 + rb1sg1, 
-                  data = male_match, family = binomial, weights = weights)
-or_male <- exp(coef(model_male)["poor_sleep"])
-ci_male <- exp(confint(model_male)["poor_sleep", ])
-
-# Females
-female_match <- subset(matched_data, sex == 2)
-model_female <- glm(functional_decline ~ poor_sleep + rb1se1z + rb1pa60 + rb1sg1, 
-                    data = female_match, family = binomial, weights = weights)
-or_female <- exp(coef(model_female)["poor_sleep"])
-ci_female <- exp(confint(model_female)["poor_sleep", ])
-
-# Interaction tests
-model_age_interaction <- glm(functional_decline ~ poor_sleep * age_group + rb1se1z + rb1pa60 + rb1sg1,
-                             data = matched_data, family = binomial, weights = weights)
-age_interaction_p <- coef(summary(model_age_interaction))["poor_sleep:age_group≥50", 4]
-
-model_sex_interaction <- glm(functional_decline ~ poor_sleep * factor(sex) + rb1se1z + rb1pa60 + rb1sg1,
-                             data = matched_data, family = binomial, weights = weights)
-sex_interaction_p <- coef(summary(model_sex_interaction))["poor_sleep:factor(sex)2", 4]
-
-cat("\nSubgroup Results:\n")
-cat("Age <50: OR =", round(or_young, 2), "(", round(ci_young[1], 2), "-", round(ci_young[2], 2), ")\n")
-cat("Age ≥50: OR =", round(or_older, 2), "(", round(ci_older[1], 2), "-", round(ci_older[2], 2), ")\n")
-cat("Males: OR =", round(or_male, 2), "(", round(ci_male[1], 2), "-", round(ci_male[2], 2), ")\n")
-cat("Females: OR =", round(or_female, 2), "(", round(ci_female[1], 2), "-", round(ci_female[2], 2), ")\n")
-cat("\nInteraction p-values:\n")
-cat("Age × sleep: p =", round(age_interaction_p, 3), "\n")
-cat("Sex × sleep: p =", round(sex_interaction_p, 3), "\n")
-
-# ============================================================================
-# PART 12: CREATE COMPREHENSIVE RESULTS TABLE
-# ============================================================================
-
-sleep_results_table <- data.frame(
-  Analysis = c(
-    "Feeling unrested (primary PSM)",
-    "Composite score (top 25%, PSM)",
-    "Per 1-point increase (unrested, continuous)",
-    "Per additional sleep problem (count)",
-    "1 sleep problem vs 0 (adj)",
-    "2 sleep problems vs 0 (adj)",
-    "3 sleep problems vs 0 (adj)"
-  ),
-  OR = c(
-    round(or_estimate, 2),
-    round(or_composite, 2),
-    round(sleep_coefs["unrested_continuous"], 2),
-    round(or_count, 2),
-    round(or_cats[1], 2),
-    round(or_cats[2], 2),
-    round(or_cats[3], 2)
-  ),
-  CI_Lower = c(
-    round(or_ci[1], 2),
-    round(ci_composite[1], 2),
-    round(sleep_ci["unrested_continuous", 1], 2),
-    round(ci_count[1], 2),
-    round(ci_cats[1, 1], 2),
-    round(ci_cats[2, 1], 2),
-    round(ci_cats[3, 1], 2)
-  ),
-  CI_Upper = c(
-    round(or_ci[2], 2),
-    round(ci_composite[2], 2),
-    round(sleep_ci["unrested_continuous", 2], 2),
-    round(ci_count[2], 2),
-    round(ci_cats[1, 2], 2),
-    round(ci_cats[2, 2], 2),
-    round(ci_cats[3, 2], 2)
-  ),
-  P_value = c(
-    "<0.001",
-    "<0.001",
-    "<0.001",
-    "<0.001",
-    "0.002",
-    "<0.001",
-    "<0.001"
-  )
+match_pg <- matchit(
+  treatment ~ age + sex + race + income + education + employment + marital +
+    bmi + smoking + alcohol_freq + exercise_freq + depression + 
+    overwhelmed + beyond_control + multimorbidity,
+  data = data_poor_good,
+  method = "nearest",
+  ratio = 3,
+  caliper = 0.2,
+  std.caliper = TRUE
 )
 
-write.csv(sleep_results_table, "table3_sleep_analyses_summary.csv", row.names = FALSE)
+matched_pg <- match.data(match_pg)
+cat(sprintf("Matched sample: %d (Good: %d, Poor: %d)\n", 
+            nrow(matched_pg),
+            sum(matched_pg$sleep_3level == "Good"),
+            sum(matched_pg$sleep_3level == "Poor")))
 
-# ============================================================================
-# PART 13: CREATE MANUSCRIPT TABLES
-# ============================================================================
+# 9.2 Poor vs Intermediate matching
+data_poor_int <- analysis_data %>%
+  filter(sleep_3level %in% c("Intermediate", "Poor")) %>%
+  mutate(treatment = ifelse(sleep_3level == "Poor", 1, 0))
 
-# Table 1: Pre-match characteristics
-pre_match_char <- psm_complete %>%
-  group_by(poor_sleep) %>%
-  summarise(
-    n = n(),
-    age_mean = round(mean(rb1prage, na.rm = TRUE), 1),
-    age_sd = round(sd(rb1prage, na.rm = TRUE), 1),
-    female_pct = round(mean(rb1prsex == 2, na.rm = TRUE) * 100, 1),
-    white_pct = round(mean(rb1pf7a == 1, na.rm = TRUE) * 100, 1),
-    bmi_mean = round(mean(rb1sbmi, na.rm = TRUE), 1),
-    bmi_sd = round(sd(rb1sbmi, na.rm = TRUE), 1),
-    income_mean = round(mean(rb1pb16, na.rm = TRUE), 1),
-    income_sd = round(sd(rb1pb16, na.rm = TRUE), 1),
-    edu_years_mean = round(mean(rb1sg1, na.rm = TRUE), 1),
-    edu_years_sd = round(sd(rb1sg1, na.rm = TRUE), 1),
-    multimorbidity_pct = round(mean(multimorbidity, na.rm = TRUE) * 100, 1),
-    functional_decline_pct = round(mean(functional_decline, na.rm = TRUE) * 100, 1)
-  )
+cat("\n--- Poor vs Intermediate ---\n")
+cat(sprintf("Sample size: %d (Intermediate: %d, Poor: %d)\n", 
+            nrow(data_poor_int),
+            sum(data_poor_int$sleep_3level == "Intermediate"),
+            sum(data_poor_int$sleep_3level == "Poor")))
 
-# Table 1: Post-match characteristics
-post_match_char <- matched_data %>%
-  group_by(poor_sleep) %>%
-  summarise(
-    n = n(),
-    age_mean = round(mean(rb1prage, na.rm = TRUE), 1),
-    age_sd = round(sd(rb1prage, na.rm = TRUE), 1),
-    female_pct = round(mean(rb1prsex == 2, na.rm = TRUE) * 100, 1),
-    white_pct = round(mean(rb1pf7a == 1, na.rm = TRUE) * 100, 1),
-    bmi_mean = round(mean(rb1sbmi, na.rm = TRUE), 1),
-    bmi_sd = round(sd(rb1sbmi, na.rm = TRUE), 1),
-    income_mean = round(mean(rb1pb16, na.rm = TRUE), 1),
-    income_sd = round(sd(rb1pb16, na.rm = TRUE), 1),
-    edu_years_mean = round(mean(rb1sg1, na.rm = TRUE), 1),
-    edu_years_sd = round(sd(rb1sg1, na.rm = TRUE), 1),
-    multimorbidity_pct = round(mean(multimorbidity, na.rm = TRUE) * 100, 1),
-    functional_decline_pct = round(mean(functional_decline, na.rm = TRUE) * 100, 1)
-  )
-
-# Table 2: Balance assessment
-balance_table <- balance_data
-
-# Table 4: Subgroup analyses
-subgroup_table <- data.frame(
-  Subgroup = c("Age <50 years", "Age ≥50 years", "Males", "Females"),
-  N = c(nrow(young_match), nrow(older_match), nrow(male_match), nrow(female_match)),
-  OR = c(round(or_young, 2), round(or_older, 2), round(or_male, 2), round(or_female, 2)),
-  CI_Lower = c(round(ci_young[1], 2), round(ci_older[1], 2), round(ci_male[1], 2), round(ci_female[1], 2)),
-  CI_Upper = c(round(ci_young[2], 2), round(ci_older[2], 2), round(ci_male[2], 2), round(ci_female[2], 2)),
-  P_value = c(0.156, 0.007, 0.011, 0.062),
-  Interaction = c(0.28, 0.28, 0.19, 0.19)
+match_pi <- matchit(
+  treatment ~ age + sex + race + income + education + employment + marital +
+    bmi + smoking + alcohol_freq + exercise_freq + depression + 
+    overwhelmed + beyond_control + multimorbidity,
+  data = data_poor_int,
+  method = "nearest",
+  ratio = 3,
+  caliper = 0.2,
+  std.caliper = TRUE
 )
 
-# Save all tables
-write.csv(pre_match_char, "table1_pre_match_characteristics.csv", row.names = FALSE)
-write.csv(post_match_char, "table1_post_match_characteristics.csv", row.names = FALSE)
-write.csv(balance_table, "table2_balance_assessment.csv", row.names = FALSE)
-write.csv(sleep_results_table, "table3_main_results.csv", row.names = FALSE)
-write.csv(subgroup_table, "table4_subgroup_analyses.csv", row.names = FALSE)
-write.csv(balance_comparison, "table_s1_balance_comparison.csv", row.names = FALSE)
+matched_pi <- match.data(match_pi)
+cat(sprintf("Matched sample: %d (Intermediate: %d, Poor: %d)\n", 
+            nrow(matched_pi),
+            sum(matched_pi$sleep_3level == "Intermediate"),
+            sum(matched_pi$sleep_3level == "Poor")))
 
-# ============================================================================
-# PART 14: CREATE FIGURES
-# ============================================================================
+# 9.3 Intermediate vs Good matching
+data_int_good <- analysis_data %>%
+  filter(sleep_3level %in% c("Good", "Intermediate")) %>%
+  mutate(treatment = ifelse(sleep_3level == "Intermediate", 1, 0))
 
-# Figure 1: Love plot
-fig1 <- love.plot(match_primary, 
-                  thresholds = c(m = 0.2),
-                  var.order = "unadjusted", 
-                  abs = TRUE,
-                  title = "Figure 1. Love Plot: Covariate Balance Before and After 1:3 Matching") +
-  theme_minimal()
-ggsave("Figure1_Love_Plot.png", fig1, width = 10, height = 7, dpi = 300)
+cat("\n--- Intermediate vs Good ---\n")
+cat(sprintf("Sample size: %d (Good: %d, Intermediate: %d)\n", 
+            nrow(data_int_good),
+            sum(data_int_good$sleep_3level == "Good"),
+            sum(data_int_good$sleep_3level == "Intermediate")))
 
-# Figure 2: Dose-response plot
-dose_data <- data.frame(
-  Problems = factor(c("0 problems", "1 problem", "2 problems", "3 problems"),
-                    levels = c("0 problems", "1 problem", "2 problems", "3 problems")),
-  OR = c(1.0, or_cats[1], or_cats[2], or_cats[3]),
-  CI_Lower = c(1.0, ci_cats[1,1], ci_cats[2,1], ci_cats[3,1]),
-  CI_Upper = c(1.0, ci_cats[1,2], ci_cats[2,2], ci_cats[3,2]),
-  n = c(sum(psm_complete_all$sleep_count == 0),
-        sum(psm_complete_all$sleep_count == 1),
-        sum(psm_complete_all$sleep_count == 2),
-        sum(psm_complete_all$sleep_count == 3))
+match_ig <- matchit(
+  treatment ~ age + sex + race + income + education + employment + marital +
+    bmi + smoking + alcohol_freq + exercise_freq + depression + 
+    overwhelmed + beyond_control + multimorbidity,
+  data = data_int_good,
+  method = "nearest",
+  ratio = 3,
+  caliper = 0.2,
+  std.caliper = TRUE
 )
 
-fig2 <- ggplot(dose_data, aes(x = Problems, y = OR, fill = Problems)) +
-  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
-  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2, linewidth = 0.8) +
-  geom_hline(yintercept = 1.0, linetype = "dashed", color = "red", linewidth = 0.8) +
-  scale_fill_manual(values = c("gray70", "steelblue", "steelblue4", "navy")) +
-  geom_text(aes(y = 0.2, label = paste0("n=", n)), vjust = 0, size = 3.5) +
-  geom_text(aes(y = OR + 0.3, label = sprintf("%.2f", OR)), vjust = 0, size = 4, fontface = "bold") +
-  labs(title = "Figure 2. Dose-Response Relationship",
-       x = "Number of Sleep Problems", y = "Odds Ratio (95% CI)") +
-  scale_y_continuous(limits = c(0, 6)) +
+matched_ig <- match.data(match_ig)
+cat(sprintf("Matched sample: %d (Good: %d, Intermediate: %d)\n", 
+            nrow(matched_ig),
+            sum(matched_ig$sleep_3level == "Good"),
+            sum(matched_ig$sleep_3level == "Intermediate")))
+
+# ==============================================================================
+# 10. BALANCE ASSESSMENT
+# ==============================================================================
+
+cat("\n=== Balance Assessment ===\n")
+
+# Check balance for each comparison
+balance_pg <- bal.tab(match_pg, data = data_poor_good)
+balance_pi <- bal.tab(match_pi, data = data_poor_int)
+balance_ig <- bal.tab(match_ig, data = data_int_good)
+
+cat("\nPoor vs Good - Maximum SMD after matching:\n")
+print(max(abs(balance_pg$Balance$Diff.Adj), na.rm = TRUE))
+
+cat("\nPoor vs Intermediate - Maximum SMD after matching:\n")
+print(max(abs(balance_pi$Balance$Diff.Adj), na.rm = TRUE))
+
+cat("\nIntermediate vs Good - Maximum SMD after matching:\n")
+print(max(abs(balance_ig$Balance$Diff.Adj), na.rm = TRUE))
+
+# Create Love plot for Poor vs Good
+balance_df <- as.data.frame(balance_pg$Balance)
+balance_df$Variable <- rownames(balance_df)
+
+love_data <- balance_df %>%
+  dplyr::select(Variable, Diff.Un, Diff.Adj) %>%
+  pivot_longer(cols = c(Diff.Un, Diff.Adj), 
+               names_to = "Type", 
+               values_to = "SMD") %>%
+  mutate(Type = recode(Type, "Diff.Un" = "Unmatched", "Diff.Adj" = "Matched"))
+
+love_plot <- ggplot(love_data, aes(x = abs(SMD), y = reorder(Variable, abs(SMD)), 
+                                   color = Type, shape = Type)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "gray50", alpha = 0.5) +
+  geom_vline(xintercept = 0.2, linetype = "dashed", color = "gray30", alpha = 0.5) +
+  scale_x_continuous(limits = c(0, max(abs(love_data$SMD), na.rm = TRUE) + 0.1)) +
+  scale_color_manual(values = c("Unmatched" = "#E41A1C", "Matched" = "#377EB8")) +
   theme_minimal() +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
-ggsave("Figure2_Dose_Response.png", fig2, width = 8, height = 6, dpi = 300)
+  labs(title = "Covariate Balance: Poor vs Good Sleep",
+       x = "Absolute Standardized Mean Difference", y = "") +
+  theme(legend.position = "bottom")
 
-# ============================================================================
-# PART 15: SAVE ALL OUTPUTS
-# ============================================================================
+print(love_plot)
+ggsave("love_plot.png", love_plot, width = 10, height = 8, dpi = 300)
 
-sink("psm_analysis_summary.txt")
-cat("PROPENSITY SCORE MATCHED ANALYSIS\n")
-cat("Sleep Disturbances and Functional Decline\n")
-cat("MIDUS Refresher 2 Study\n")
-cat("========================================\n\n")
-cat("Analysis Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n\n")
-cat("PRIMARY RESULTS\n")
-cat("--------------\n")
-cat("OR (95% CI):", round(or_estimate, 2), "(", round(or_ci[1], 2), "-", round(or_ci[2], 2), ")\n")
-cat("Risk Difference:", round(rd, 3), "\n")
-cat("Number Needed to Harm:", round(abs(nnh), 1), "\n\n")
-cat("DOSE-RESPONSE\n")
-cat("-------------\n")
-cat("Per additional sleep problem OR:", round(or_count, 2), "(", round(ci_count[1], 2), "-", round(ci_count[2], 2), ")\n")
-cat("p for trend:", round(summary(model_count_cont)$coefficients["sleep_count", 4], 4), "\n")
+# ==============================================================================
+# 11. PRIMARY OUTCOME ANALYSES
+# ==============================================================================
+
+cat("\n=== Primary Matched Analyses ===\n")
+
+# Function to run matched analysis
+run_matched_analysis <- function(data) {
+  model <- glm(
+    functional_limitation ~ treatment + overwhelmed + beyond_control + education,
+    data = data,
+    family = binomial()
+  )
+  
+  vcov_mat <- vcovCL(model, cluster = data$subclass, type = "HC0")
+  coef_test <- coeftest(model, vcov = vcov_mat)
+  
+  or <- exp(coef(model)[2])
+  ci <- exp(confint(model, parm = 2, vcov. = vcov_mat))
+  p_val <- coef_test[2, 4]
+  
+  return(list(or = or, ci_lower = ci[1], ci_upper = ci[2], p = p_val))
+}
+
+# Run analyses
+pg_results <- run_matched_analysis(matched_pg)
+pi_results <- run_matched_analysis(matched_pi)
+ig_results <- run_matched_analysis(matched_ig)
+
+# Compile results
+primary_results <- data.frame(
+  Comparison = c("Poor vs Good", "Poor vs Intermediate", "Intermediate vs Good"),
+  OR = c(pg_results$or, pi_results$or, ig_results$or),
+  CI_lower = c(pg_results$ci_lower, pi_results$ci_lower, ig_results$ci_lower),
+  CI_upper = c(pg_results$ci_upper, pi_results$ci_upper, ig_results$ci_upper),
+  p_value = c(pg_results$p, pi_results$p, ig_results$p)
+)
+
+print(primary_results)
+
+# ==============================================================================
+# 12. DOSE-RESPONSE ANALYSIS
+# ==============================================================================
+
+cat("\n=== Dose-Response Analysis ===\n")
+
+# Create sleep scores
+matched_pg <- matched_pg %>%
+  mutate(sleep_score = ifelse(sleep_3level == "Poor", 2, 0))
+
+matched_pi <- matched_pi %>%
+  mutate(sleep_score = case_when(
+    sleep_3level == "Poor" ~ 2,
+    sleep_3level == "Intermediate" ~ 1
+  ))
+
+matched_ig <- matched_ig %>%
+  mutate(sleep_score = case_when(
+    sleep_3level == "Intermediate" ~ 1,
+    sleep_3level == "Good" ~ 0
+  ))
+
+# Combine matched samples
+combined_matched <- bind_rows(matched_pg, matched_pi, matched_ig) %>%
+  distinct(id, .keep_all = TRUE)  # Remove duplicates
+
+cat(sprintf("Combined matched sample size: %d\n", nrow(combined_matched)))
+cat("Sleep score distribution:\n")
+print(table(combined_matched$sleep_score))
+
+# Create sleep level factor
+combined_matched <- combined_matched %>%
+  mutate(sleep_level = factor(case_when(
+    sleep_score == 0 ~ "Good",
+    sleep_score == 1 ~ "Intermediate",
+    sleep_score == 2 ~ "Poor"
+  ), levels = c("Good", "Intermediate", "Poor")))
+
+# Dose-response model
+dose_model <- glm(
+  functional_limitation ~ sleep_level + overwhelmed + beyond_control + education,
+  data = combined_matched,
+  family = binomial()
+)
+
+dose_results <- tidy(dose_model, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(grepl("sleep_level", term))
+
+print(dose_results)
+
+# Test for linear trend
+trend_model <- glm(
+  functional_limitation ~ sleep_score + overwhelmed + beyond_control + education,
+  data = combined_matched,
+  family = binomial()
+)
+
+trend_result <- tidy(trend_model, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term == "sleep_score")
+
+cat("\nLinear trend per level increase:\n")
+print(trend_result)
+
+# ==============================================================================
+# 13. SUBGROUP ANALYSES (Poor vs Good)
+# ==============================================================================
+
+cat("\n=== Subgroup Analyses ===\n")
+
+matched_pg <- matched_pg %>%
+  mutate(age_group = ifelse(age < 50, "<50", "≥50"))
+
+# Function for subgroup analysis
+run_subgroup <- function(data, subset_condition) {
+  subset_data <- tryCatch({
+    data %>% filter(!!rlang::parse_expr(subset_condition))
+  }, error = function(e) NULL)
+  
+  if(is.null(subset_data) || nrow(subset_data) < 50) return(NULL)
+  
+  model <- glm(
+    functional_limitation ~ treatment + overwhelmed + beyond_control + education,
+    data = subset_data,
+    family = binomial()
+  )
+  
+  if(!model$converged) return(NULL)
+  
+  or <- exp(coef(model)["treatment"])
+  ci <- exp(confint(model, parm = "treatment"))
+  
+  return(data.frame(OR = or, CI_lower = ci[1], CI_upper = ci[2]))
+}
+
+# Run subgroup analyses
+subgroup_results <- bind_rows(
+  data.frame(Subgroup = "Age <50", run_subgroup(matched_pg, "age < 50")),
+  data.frame(Subgroup = "Age ≥50", run_subgroup(matched_pg, "age >= 50")),
+  data.frame(Subgroup = "Male", run_subgroup(matched_pg, "sex == 'Male'")),
+  data.frame(Subgroup = "Female", run_subgroup(matched_pg, "sex == 'Female'"))
+)
+
+print(subgroup_results)
+
+# ==============================================================================
+# 14. SENSITIVITY ANALYSES - CORRECTED VERSION
+# ==============================================================================
+
+cat("\n=== Sensitivity Analyses ===\n")
+
+# 14.1 1:1 matching
+match_pg_1to1 <- matchit(
+  treatment ~ age + sex + race + income + education + employment + marital +
+    bmi + smoking + alcohol_freq + exercise_freq + depression + 
+    overwhelmed + beyond_control + multimorbidity,
+  data = data_poor_good,
+  method = "nearest",
+  ratio = 1,
+  caliper = 0.2,
+  std.caliper = TRUE
+)
+
+matched_pg_1to1 <- match.data(match_pg_1to1)
+model_1to1 <- glm(
+  functional_limitation ~ treatment + overwhelmed + beyond_control + education,
+  data = matched_pg_1to1,
+  family = binomial()
+)
+
+# 14.2 Stricter caliper (0.1)
+match_pg_strict <- matchit(
+  treatment ~ age + sex + race + income + education + employment + marital +
+    bmi + smoking + alcohol_freq + exercise_freq + depression + 
+    overwhelmed + beyond_control + multimorbidity,
+  data = data_poor_good,
+  method = "nearest",
+  ratio = 3,
+  caliper = 0.1,
+  std.caliper = TRUE
+)
+
+matched_pg_strict <- match.data(match_pg_strict)
+model_strict <- glm(
+  functional_limitation ~ treatment + overwhelmed + beyond_control + education,
+  data = matched_pg_strict,
+  family = binomial()
+)
+
+# Compile sensitivity results - USING PRIMARY_RESULTS FOR THE PRIMARY ANALYSIS
+sensitivity_results <- data.frame(
+  Analysis = c("Primary analysis (1:3 matching, caliper=0.2)", 
+               "1:1 matching", 
+               "Stricter caliper (0.1)"),
+  OR = c(
+    primary_results$OR[primary_results$Comparison == "Poor vs Good"],  # Using the correct 2.26
+    exp(coef(model_1to1)["treatment"]),
+    exp(coef(model_strict)["treatment"])
+  ),
+  CI_lower = c(
+    primary_results$CI_lower[primary_results$Comparison == "Poor vs Good"],
+    exp(confint(model_1to1, parm = "treatment"))[1],
+    exp(confint(model_strict, parm = "treatment"))[1]
+  ),
+  CI_upper = c(
+    primary_results$CI_upper[primary_results$Comparison == "Poor vs Good"],
+    exp(confint(model_1to1, parm = "treatment"))[2],
+    exp(confint(model_strict, parm = "treatment"))[2]
+  ),
+  N = c(nrow(matched_pg), nrow(matched_pg_1to1), nrow(matched_pg_strict))
+)
+
+print(sensitivity_results)
+
+# ==============================================================================
+# 15. VISUALIZATIONS
+# ==============================================================================
+
+cat("\n=== Generating Visualizations ===\n")
+
+# Forest plot
+forest_data <- primary_results %>%
+  mutate(Comparison = factor(Comparison, 
+                             levels = c("Poor vs Good", "Poor vs Intermediate", "Intermediate vs Good")))
+
+forest_plot <- ggplot(forest_data, aes(x = OR, y = Comparison, 
+                                       xmin = CI_lower, xmax = CI_upper)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 3, color = "#377EB8") +
+  geom_errorbarh(height = 0.2, color = "#377EB8") +
+  scale_x_log10(breaks = c(0.5, 0.75, 1, 1.5, 2, 3)) +
+  theme_minimal() +
+  labs(title = "Propensity Score Matched Analysis",
+       subtitle = "Association between sleep disturbances and functional limitation",
+       x = "Odds Ratio (95% CI)", y = "")
+
+print(forest_plot)
+ggsave("forest_plot.png", forest_plot, width = 8, height = 4, dpi = 300)
+
+# Dose-response plot
+dose_plot_data <- dose_results %>%
+  mutate(sleep_level = case_when(
+    grepl("Intermediate", term) ~ "Intermediate",
+    grepl("Poor", term) ~ "Poor"
+  )) %>%
+  bind_rows(data.frame(
+    term = "Good (ref)",
+    estimate = 1,
+    conf.low = 1,
+    conf.high = 1,
+    sleep_level = "Good"
+  )) %>%
+  mutate(sleep_level = factor(sleep_level, levels = c("Good", "Intermediate", "Poor")))
+
+dose_plot <- ggplot(dose_plot_data, aes(x = sleep_level, y = estimate, 
+                                        ymin = conf.low, ymax = conf.high)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 4, color = "#E41A1C") +
+  geom_errorbar(width = 0.2, color = "#E41A1C") +
+  scale_y_log10(breaks = c(0.8, 1, 1.2, 1.4, 1.6, 1.8, 2.0)) +
+  theme_minimal() +
+  labs(title = "Dose-Response Relationship",
+       subtitle = "Odds of functional limitation by sleep group",
+       x = "Sleep Group", y = "Odds Ratio (95% CI)")
+
+print(dose_plot)
+ggsave("dose_response.png", dose_plot, width = 6, height = 5, dpi = 300)
+
+# ==============================================================================
+# 16. EXPORT RESULTS
+# ==============================================================================
+
+cat("\n=== Exporting Results ===\n")
+
+# Create results directory
+results_dir <- "results_matched_3level"
+if(!dir.exists(results_dir)) dir.create(results_dir)
+
+# Save results as CSV
+write.csv(primary_results, file.path(results_dir, "primary_results.csv"), row.names = FALSE)
+write.csv(dose_results, file.path(results_dir, "dose_response.csv"), row.names = FALSE)
+write.csv(trend_result, file.path(results_dir, "linear_trend.csv"), row.names = FALSE)
+if(exists("subgroup_results") && nrow(subgroup_results) > 0) {
+  write.csv(subgroup_results, file.path(results_dir, "subgroup_results.csv"), row.names = FALSE)
+}
+write.csv(sensitivity_results, file.path(results_dir, "sensitivity_results.csv"), row.names = FALSE)
+
+# Save R objects
+saveRDS(list(
+  data = analysis_data,
+  matched_pg = matched_pg,
+  matched_pi = matched_pi,
+  matched_ig = matched_ig,
+  combined = combined_matched,
+  primary = primary_results,
+  dose = dose_results,
+  trend = trend_result,
+  subgroup = subgroup_results,
+  sensitivity = sensitivity_results
+), file = file.path(results_dir, "analysis_results.rds"))
+
+# Create manuscript summary
+sink(file.path(results_dir, "manuscript_summary.txt"))
+
+cat("==========================================================\n")
+cat("PROPENSITY SCORE MATCHED ANALYSIS WITH 3-LEVEL EXPOSURE\n")
+cat("MIDUS Refresher 2 Data\n")
+cat("==========================================================\n\n")
+
+cat("SAMPLE CHARACTERISTICS:\n")
+cat(sprintf("Total N: %d\n", nrow(analysis_data)))
+cat(sprintf("Good Sleep: %d (%.1f%%)\n", 
+            sum(analysis_data$sleep_3level == "Good"),
+            100 * mean(analysis_data$sleep_3level == "Good")))
+cat(sprintf("Intermediate Sleep: %d (%.1f%%)\n", 
+            sum(analysis_data$sleep_3level == "Intermediate"),
+            100 * mean(analysis_data$sleep_3level == "Intermediate")))
+cat(sprintf("Poor Sleep: %d (%.1f%%)\n\n", 
+            sum(analysis_data$sleep_3level == "Poor"),
+            100 * mean(analysis_data$sleep_3level == "Poor")))
+
+cat("PRIMARY MATCHED RESULTS:\n")
+print(primary_results)
+
+cat("\nDOSE-RESPONSE ANALYSIS:\n")
+print(dose_results)
+cat(sprintf("\nLinear trend: OR = %.2f per level (95%% CI: %.2f-%.2f), p = %.4f\n",
+            trend_result$estimate, trend_result$conf.low, 
+            trend_result$conf.high, trend_result$p.value))
+
+if(exists("subgroup_results") && nrow(subgroup_results) > 0) {
+  cat("\nSUBGROUP ANALYSES (Poor vs Good):\n")
+  print(subgroup_results)
+}
+
+cat("\nSENSITIVITY ANALYSES (Poor vs Good):\n")
+print(sensitivity_results)
+
 sink()
 
-cat("\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("ANALYSIS COMPLETE\n")
-cat(paste(rep("=", 60), collapse = ""), "\n")
-cat("\nFiles saved:\n")
-cat("  - CSV tables: table1_*.csv, table2_*.csv, table3_*.csv, table4_*.csv\n")
-cat("  - Figures: Figure1_Love_Plot.png, Figure2_Dose_Response.png\n")
-cat("  - Summary: psm_analysis_summary.txt\n")
+cat("\n=== ANALYSIS COMPLETE ===\n")
+cat(sprintf("All results saved to '%s' directory\n", results_dir))
+cat("Files created:\n")
+cat("  - primary_results.csv\n")
+cat("  - dose_response.csv\n")
+cat("  - linear_trend.csv\n")
+cat("  - subgroup_results.csv\n")
+cat("  - sensitivity_results.csv\n")
+cat("  - love_plot.png\n")
+cat("  - forest_plot.png\n")
+cat("  - dose_response.png\n")
+cat("  - analysis_results.rds\n")
+cat("  - manuscript_summary.txt\n")
