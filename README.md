@@ -156,6 +156,8 @@ Sleep and functional outcomes are self‑reported MIDUS survey measures.
 Missing data are handled via simple median/mode imputation.
 Matching and PS estimation adjust for measured covariates only; unmeasured confounding may remain.
 
+
+## Citation
 If you use or adapt this code, please cite:
 
 Okeagu PN, Okeke GO, Kebede YT. Dose‑Response Association Between Sleep Disturbances and Functional Limitation in Midlife: A Propensity Score–Matched Study. [Manuscript].
@@ -170,6 +172,10 @@ Philips N. Okeagu
 Department of Oral Health Policy and Epidemiology
 
 Harvard School of Dental Medicine
+
+188 Longwood Avenue, Boston, MA 02115, USA
+
+Email: philipsokeagu@hsph.harvard.edu
 
 188 Longwood Avenue, Boston, MA 02115, USA
 
