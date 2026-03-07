@@ -108,8 +108,6 @@ and saves:
 CSV tables
 primary_results.csv – ORs and 95% CIs for:
 
-```r
-
 Poor vs Good,
 Poor vs Intermediate,
 Intermediate vs Good.
@@ -157,7 +155,7 @@ Cross‑sectional design; associations should not be interpreted as causal.
 Sleep and functional outcomes are self‑reported MIDUS survey measures.
 Missing data are handled via simple median/mode imputation.
 Matching and PS estimation adjust for measured covariates only; unmeasured confounding may remain.
-Citation
+
 If you use or adapt this code, please cite:
 
 Okeagu PN, Okeke GO, Kebede YT. Dose‑Response Association Between Sleep Disturbances and Functional Limitation in Midlife: A Propensity Score–Matched Study. [Manuscript].
@@ -176,3 +174,4 @@ Harvard School of Dental Medicine
 188 Longwood Avenue, Boston, MA 02115, USA
 
 Email: philipsokeagu@hsph.harvard.edu
+
